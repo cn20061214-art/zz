@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101827">
+<title>S/R Retest Scanner V1.0</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1220;--panel:#121d2e;--line:#26364c;--muted:#93a4bb;--text:#edf3fb;--green:#25c58a;--red:#ff667a;--blue:#69a9ff;--amber:#ffc46b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{padding:20px 16px 14px;background:#101a2a;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:3}
+h1{font-size:20px;margin:0 0 5px} .sub{color:var(--muted);font-size:12px}
+.wrap{max-width:980px;margin:auto;padding:14px 12px 40px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+button,select{background:#1b2a40;color:var(--text);border:1px solid #344862;border-radius:10px;padding:11px 13px;font-size:14px}
+button.primary{background:#245b9e;border-color:#3979c5}button:disabled{opacity:.5}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}
+.stat,.card,.empty,.notice{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:12px}
+.stat b{display:block;font-size:20px;margin-top:5px}.stat span,.muted{color:var(--muted);font-size:12px}
+.notice{font-size:12px;line-height:1.55;color:#c4d1e1;margin:10px 0}
+.status{font-size:12px;color:var(--muted);margin:8px 2px}
+.card{margin:10px 0}.cardtop{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.symbol{font-weight:750;font-size:16px}.pill{font-size:11px;padding:5px 8px;border-radius:99px;font-weight:700}
+.long{background:#123d34;color:#65e4b3}.short{background:#4a202d;color:#ff9aaa}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.cell{background:#0c1625;border-radius:9px;padding:9px;min-width:0}.cell small{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.cell b{font-size:13px;overflow-wrap:anywhere}
+.meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:11px}
+.empty{text-align:center;color:var(--muted);padding:24px 12px}
+footer{color:var(--muted);font-size:11px;line-height:1.6;padding:12px 2px}
+@media(min-width:700px){.cards{display:grid;grid-template-columns:1fr 1fr;gap:10px}.card{margin:0}.wrap{padding-top:20px}}
+</style>
+</head>
+<body>
+<header><h1>📊 S/R RETEST SCANNER <span style="color:#69a9ff">V1.0</span></h1><div class="sub">BINANCE USDⓈ-M · 15분봉 · 지지/저항 반등 & 리테스트</div></header>
+<main class="wrap">
+  <div class="toolbar">
+    <button class="primary" id="scanBtn">지금 스캔</button>
+    <button id="autoBtn">자동 갱신: ON</button>
+    <select id="count"><option value="50">상위 50개</option><option value="100" selected>상위 100개</option><option value="150">상위 150개</option></select>
+  </div>
+  <div class="stats">
+    <div class="stat"><span>검색 종목</span><b id="scanned">0</b></div>
+    <div class="stat"><span>롱 신호</span><b id="longs" style="color:var(--green)">0</b></div>
+    <div class="stat"><span>숏 신호</span><b id="shorts" style="color:var(--red)">0</b></div>
+  </div>
+  <div class="status" id="status">연결 대기 중</div>
+  <div class="notice">신호는 마감된 15분봉만 사용합니다. 지지/저항은 최근 스윙 고점·저점을 묶어 계산하는 근사치이며, 실시간 주문 기능은 없습니다.</div>
+  <div id="results" class="cards"><div class="empty">‘지금 스캔’을 눌러 검색을 시작하세요.</div></div>
+  <footer>
+    기준: 최근 스윙 구간의 반복 반응 + 지지 반등/저항 거부 또는 돌파 후 리테스트 확인.<br>
+    진입가는 확정 캔들 종가 기준 참고값입니다. 손절은 구간 바깥 + ATR 여유폭, 익절은 기본 손익비 1:2 및 1:3으로 계산합니다.<br>
+    거래소 API·네트워크 상태에 따라 일부 종목이 누락될 수 있습니다. 투자 판단과 주문은 본인이 별도로 확인하세요.
+  </footer>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const BASE='https://fapi.binance.com';
+let busy=false,auto=true,timer=null;
+const fmt=n=>Number(n).toLocaleString('en-US',{maximumFractionDigits:8});
+const kst=t=>new Date(t+9*60*60*1000).toISOString().slice(0,16).replace('T',' ')+' KST';
+async function get(path){
+  const r=await fetch(BASE+path);
+  if(!r.ok) throw new Error('Binance API 응답 오류: '+r.status);
+  return r.json();
+}
+function atr(candles,period=14){
+  let trs=[];
+  for(let i=1;i<candles.length;i++){
+    const c=candles[i],p=candles[i-1];
+    trs.push(Math.max(c.h-c.l,Math.abs(c.h-p.c),Math.abs(c.l-p.c)));
+  }
+  return trs.slice(-period).reduce((a,b)=>a+b,0)/Math.max(1,Math.min(period,trs.length));
+}
+function pivots(cs){
+  const highs=[],lows=[],start=Math.max(3,cs.length-90),end=cs.length-4;
+  for(let i=start;i<=end;i++){
+    let hi=true,lo=true;
+    for(let j=i-3;j<=i+3;j++){if(j===i)continue;if(cs[j].h>=cs[i].h)hi=false;if(cs[j].l<=cs[i].l)lo=false;}
+    if(hi)highs.push({p:cs[i].h,i});
+    if(lo)lows.push({p:cs[i].l,i});
+  }
+  return {highs,lows};
+}
+function cluster(points,price,band){
+  const near=points.filter(x=>Math.abs(x.p-price)<=band);
+  if(!near.length)return null;
+  const level=near.reduce((s,x)=>s+x.p,0)/near.length;
+  return {level,touches:near.length,last:Math.max(...near.map(x=>x.i))};
+}
+function analyze(symbol,raw){
+  const cs=raw.map(x=>({t:x[0],o:+x[1],h:+x[2],l:+x[3],c:+x[4],v:+x[5]}));
+  if(cs.length<60)return null;
+  const closed=cs.slice(0,-1),n=closed.length,cur=closed[n-1],prev=closed[n-2];
+  const a=atr(closed),band=Math.max(a*.30,cur.c*.0012);
+  const {highs,lows}=pivots(closed);
+  const supportCandidates=lows.filter(x=>x.p<cur.c+band);
+  const resistanceCandidates=highs.filter(x=>x.p>cur.c-band);
+  let support=null,resistance=null;
+  if(supportCandidates.length){
+    const nearest=Math.max(...supportCandidates.map(x=>x.p));
+    support=cluster(supportCandidates,nearest,band);
+  }
+  if(resistanceCandidates.length){
+    const nearest=Math.min(...resistanceCandidates.map(x=>x.p));
+    resistance=cluster(resistanceCandidates,nearest,band);
+  }
+  const bullish=cur.c>cur.o, bearish=cur.c<cur.o;
+  const body=Math.abs(cur.c-cur.o),range=Math.max(cur.h-cur.l,1e-12);
+  const volAvg=closed.slice(-21,-1).reduce((s,x)=>s+x.v,0)/20;
+  const volumeOK=cur.v>=volAvg*.75;
+  let side=null,reason='',zone=null,stop=null;
+  // Support bounce: price tests a repeatedly observed support, then closes above prior candle high.
+  if(support&&support.touches>=2&&cur.l<=support.level+band*.35&&cur.c>support.level&&bullish&&cur.c>prev.h&&body/range>=.35&&volumeOK){
+    side='LONG';zone=support.level;reason='지지 반등 확인';
+    stop=Math.min(cur.l,support.level)-a*.20;
+  }
+  // Resistance rejection
+  if(!side&&resistance&&resistance.touches>=2&&cur.h>=resistance.level-band*.35&&cur.c<resistance.level&&bearish&&cur.c<prev.l&&body/range>=.35&&volumeOK){
+    side='SHORT';zone=resistance.level;reason='저항 거부 확인';
+    stop=Math.max(cur.h,resistance.level)+a*.20;
+  }
+  // Breakout retest, using prior fully closed candle for breakout and latest closed candle for retest.
+  if(!side&&resistance&&prev.c>resistance.level+band*.15&&cur.l<=resistance.level+band*.35&&cur.c>resistance.level&&bullish&&cur.c>cur.o&&volumeOK){
+    side='LONG';zone=resistance.level;reason='저항 돌파 후 리테스트';stop=Math.min(cur.l,resistance.level)-a*.20;
+  }
+  if(!side&&support&&prev.c<support.level-band*.15&&cur.h>=support.level-band*.35&&cur.c<support.level&&bearish&&volumeOK){
+    side='SHORT';zone=support.level;reason='지지 이탈 후 리테스트';stop=Math.max(cur.h,support.level)+a*.20;
+  }
+  if(!side)return null;
+  const entry=cur.c,risk=Math.abs(entry-stop);
+  if(!risk||risk/entry>.025)return null;
+  const tp1=side==='LONG'?entry+2*risk:entry-2*risk;
+  const tp2=side==='LONG'?entry+3*risk:entry-3*risk;
+  return {symbol,side,reason,entry,stop,tp1,tp2,zone,time:cur.t,change:((cur.c-prev.c)/prev.c)*100};
+}
+async function scan(){
+ if(busy)return;busy=true;$('scanBtn').disabled=true;$('status').textContent='시장 목록 및 15분봉 데이터 조회 중…';
+ try{
+  const [info,tickers]=await Promise.all([get('/fapi/v1/exchangeInfo'),get('/fapi/v1/ticker/24hr')]);
+  const valid=new Set(info.symbols.filter(s=>s.status==='TRADING'&&s.contractType==='PERPETUAL'&&s.quoteAsset==='USDT').map(s=>s.symbol));
+  const list=tickers.filter(t=>valid.has(t.symbol)).sort((a,b)=>+b.quoteVolume- +a.quoteVolume).slice(0,+$('count').value);
+  let idx=0,done=0,signals=[];
+  async function worker(){
+   while(idx<list.length){
+    const item=list[idx++];
+    try{const data=await get('/fapi/v1/klines?symbol='+item.symbol+'&interval=15m&limit=120');const s=analyze(item.symbol,data);if(s)signals.push(s);}
+    catch(e){}
+    done++;$('status').textContent=`15분봉 분석 중… ${done}/${list.length}`;
+   }
+  }
+  await Promise.all(Array.from({length:8},worker));
+  signals.sort((a,b)=>b.time-a.time);
+  $('scanned').textContent=done;
+  $('longs').textContent=signals.filter(s=>s.side==='LONG').length;
+  $('shorts').textContent=signals.filter(s=>s.side==='SHORT').length;
+  $('status').textContent=`완료 · ${kst(Date.now())} · 신호 ${signals.length}개`;
+  render(signals);
+ }catch(e){$('status').textContent='오류: '+e.message+' · 잠시 후 다시 시도하세요.';}
+ finally{$('scanBtn').disabled=false;busy=false;}
+}
+function render(signals){
+ const root=$('results');
+ if(!signals.length){root.innerHTML='<div class="empty">현재 확정된 진입 신호가 없습니다.<br><span class="muted">다음 15분봉 마감 후 다시 확인하세요.</span></div>';return;}
+ root.innerHTML=signals.map(s=>`
+ <article class="card">
+  <div class="cardtop"><div class="symbol">${s.symbol}</div><span class="pill ${s.side==='LONG'?'long':'short'}">${s.side}</span></div>
+  <div class="meta"><span>${s.reason}</span><span>기준봉 ${kst(s.time)}</span></div>
+  <div class="grid">
+   <div class="cell"><small>진입가</small><b>${fmt(s.entry)}</b></div>
+   <div class="cell"><small>손절가</small><b style="color:var(--red)">${fmt(s.stop)}</b></div>
+   <div class="cell"><small>지지/저항 구간</small><b>${fmt(s.zone)}</b></div>
+   <div class="cell"><small>1차 익절 · 2R</small><b style="color:var(--green)">${fmt(s.tp1)}</b></div>
+   <div class="cell"><small>2차 익절 · 3R</small><b style="color:var(--green)">${fmt(s.tp2)}</b></div>
+   <div class="cell"><small>확정봉 변동률</small><b>${s.change>=0?'+':''}${s.change.toFixed(2)}%</b></div>
+  </div>
+ </article>`).join('');
+}
+function schedule(){if(timer)clearInterval(timer);if(auto)timer=setInterval(()=>{if(!document.hidden)scan();},60000);}
+$('scanBtn').addEventListener('click',scan);
+$('autoBtn').addEventListener('click',()=>{auto=!auto;$('autoBtn').textContent='자동 갱신: '+(auto?'ON':'OFF');schedule();});
+$('count').addEventListener('change',scan);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&auto)scan();});
+scan();schedule();
+</script>
+</body>
+</html>
